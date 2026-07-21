@@ -2,7 +2,19 @@
 
 Convert GLB/glTF to **3D Tiles 1.1** with spatial partitioning, LOD, and compression.
 
-```
+## 安装使用
+
+**方式一：.tgz 包（需要 Node.js 18+）**
+
+```bash
+# 解压
+tar -xzf gltf2tiles-0.1.0.tgz
+
+# 直接运行
+node package/dist/cli.js -i model.glb -o ./output
+
+# 或全局安装
+npm install -g ./gltf2tiles-0.1.0.tgz
 gltf2tiles -i model.glb -o ./output
 ```
 
@@ -31,9 +43,7 @@ gltf2tiles -i model.glb -o ./output
 
 ```
 gltf2tiles -i model.glb -o ./output
-
 gltf2tiles -i city.glb -o ./output --max-items 500 --lod-levels 3 --draco
-
 gltf2tiles -i model.glb -o ./output --lon 120.0 --lat 30.0 --alt 0 --implicit
 ```
 
@@ -51,17 +61,9 @@ output/
     └── 0/0/0.subtree
 ```
 
-## Windows 独立 exe
-
-```
-gltf2tiles.exe -i model.glb -o ./output
-```
-
-无需安装 Node.js。直接下载即可使用。
-
 ---
 
-工具灵感与部分实现参考自 [fanvanzh/3dtiles](https://github.com/fanvanzh/3dtiles) —— 一个高性能的 Rust/C++ 混合架构 3D Tiles 转换工具。
+灵感与部分算法参考自 [fanvanzh/3dtiles](https://github.com/fanvanzh/3dtiles) —— 一个高性能的 Rust/C++ 混合架构 3D Tiles 转换工具。
 
 ## License
 

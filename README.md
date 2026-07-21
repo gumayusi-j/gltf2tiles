@@ -59,6 +59,10 @@ gltf2tiles.exe -i model.glb -o ./output
 
 无需安装 Node.js。直接下载即可使用。
 
+---
+
+工具灵感与部分实现参考自 [fanvanzh/3dtiles](https://github.com/fanvanzh/3dtiles) —— 一个高性能的 Rust/C++ 混合架构 3D Tiles 转换工具。
+
 ## License
 
 MIT

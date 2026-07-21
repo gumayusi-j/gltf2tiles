@@ -1,0 +1,50 @@
+{
+  "name": "glb23dtile",
+  "version": "0.1.0",
+  "description": "Convert GLB/glTF to 3D Tiles 1.1 — spatial partitioning, LOD, instancing",
+  "type": "module",
+  "bin": {
+    "gltf2tiles": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm run test",
+    "lint": "tsc --noEmit --pretty"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@gltf-transform/core": "^4.0.0",
+    "@gltf-transform/functions": "^4.0.0",
+    "commander": "^12.0.0",
+    "gl-matrix": "^3.4.0",
+    "meshoptimizer": "^1.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  },
+  "keywords": [
+    "3d-tiles",
+    "gltf",
+    "glb",
+    "3d-tiles-1.1",
+    "cesium",
+    "tiling"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/gltf2tiles"
+  }
+}

@@ -36,7 +36,10 @@ gltf2tiles -i model.glb -o ./output
 | `--subdivision <s>` | QUADTREE 或 OCTREE | `OCTREE` |
 | `--subtree-levels <n>` | subtree 层级 | `5` |
 | `--draco` | Draco 网格压缩 | off |
-| `--ktx2` | KTX2 纹理压缩 | off |
+| `--ktx2` | KTX2 纹理压缩（Basis Universal） | off |
+| `--ktx2-format <format>` | KTX2 格式: `etc1s` 或 `uastc` | `etc1s` |
+| `--ktx2-quality <n>` | 压缩质量 1-255（ETC1S 模式） | `128` |
+| `--ktx2-mipmaps` | 生成 mipmap 链 | off |
 | `-v, --verbose` | 详细日志 | off |
 
 ## 示例
@@ -45,6 +48,7 @@ gltf2tiles -i model.glb -o ./output
 gltf2tiles -i model.glb -o ./output
 gltf2tiles -i city.glb -o ./output --max-items 500 --lod-levels 3 --draco
 gltf2tiles -i model.glb -o ./output --lon 120.0 --lat 30.0 --alt 0 --implicit
+gltf2tiles -i scene.glb -o ./output --ktx2 --ktx2-format uastc --ktx2-mipmaps
 ```
 
 ## 输出结构

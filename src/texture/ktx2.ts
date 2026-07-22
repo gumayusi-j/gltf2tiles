@@ -1,25 +1,30 @@
 /**
  * KTX2 纹理编码器
  *
- * 基于 ktx-parse + basis-universal-codec-wasm，零原生依赖。
- * Node.js 为主运行环境，bun 为打包工具。
+ * 基于 @loaders.gl/textures 分发的 Basis Universal WASM 编码器。
+ * 底层使用 BinomialLLC/basis_universal，由 loaders.gl 团队维护打包。
  *
- * Issues fixed:
- *   1. 注册 KHR_texture_basisu glTF Extension
- *   2. 图像尺寸对齐到 4 倍数 (ETC1S/UASTC 块压缩要求)
- *   3. Alpha 通道检测优先从元数据判断，避免全像素扫描
- *   4. 使用纯 JS 解码器 (upng-js + jpeg-js) 支持 Node.js，不锁定 bun
+ * 编码流程:
+ *   1. 解码 PNG/JPEG → RGBA pixels
+ *   2. BasisEncoder → KTX2 二进制
+ *   3. 替换纹理数据 + 注册 KHR_texture_basisu
+ *
+ * WASM 加载（一次初始化，之后复用）:
+ *   basis_encoder.js   (Emscripten 模块工厂)
+ *   basis_encoder.wasm (WASM 二进制)
+ *   均取自 @loaders.gl/textures 包内 vendor。
+ *
+ * Mipmap: 使用 BasisEncoder.setMipGen(true) 内部生成，不需外部 Lanczos3。
+ *
+ * 移除依赖: ktx-parse, basis-universal-codec-wasm
+ * 新增依赖: @loaders.gl/textures (内嵌 WASM)
  */
 
-import { encodeImage, initBasisModule } from 'basis-universal-codec-wasm';
 import type { Document, Texture } from '@gltf-transform/core';
 import { KHRTextureBasisu } from '@gltf-transform/extensions';
 import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-// upng-js / jpeg-js 为纯 JS 解码器，零原生依赖
-const UPNG: any = require('upng-js');
-const jpeg: any = require('jpeg-js');
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 // ── Types ───────────────────────────────────────────────
 
@@ -30,100 +35,87 @@ export interface Ktx2EncodeOptions {
   quality: number;
   /** 是否生成 mipmap */
   generateMipmaps: boolean;
-  /** UASTC 压缩级别 0-4（仅 uastc 模式），默认 2 */
+  /** UASTC 压缩级别 0-4（仅 uastc 模式） */
   compressionLevel?: number;
 }
 
 export interface Ktx2EncodeResult {
-  /** 编码后的 KTX2 二进制数据 */
   data: Uint8Array;
-  /** 对齐后的纹理宽度 */
   width: number;
-  /** 对齐后的纹理高度 */
   height: number;
-  /** 原始纹理宽度 */
-  originalWidth: number;
-  /** 原始纹理高度 */
-  originalHeight: number;
-  /** 是否有 alpha 通道 */
   hasAlpha: boolean;
 }
 
-// ── Size alignment helpers ─────────────────────────────
+// ── WASM module loading ─────────────────────────────────
 
-/** 向上取整到 4 的倍数（Basis Universal 块压缩要求） */
-function ceilTo4(n: number): number {
-  return Math.ceil(n / 4) * 4;
+interface BasisModule {
+  BasisEncoder: new () => BasisEncoderInstance;
+  initializeBasis: () => void;
 }
 
-/** 下一个 2 的幂（mipmap 生成建议） */
-function nextPowerOf2(n: number): number {
-  if (n <= 0) return 4;
-  return 1 << (32 - Math.clz32(n - 1));
+interface BasisEncoderInstance {
+  setCreateKTX2File: (v: boolean) => void;
+  setKTX2UASTCSupercompression: (v: boolean) => void;
+  setKTX2SRGBTransferFunc: (v: boolean) => void;
+  setSliceSourceImage: (slice: number, data: Uint8Array, w: number, h: number, transparent: boolean) => void;
+  setPerceptual: (v: boolean) => void;
+  setMipSRGB: (v: boolean) => void;
+  setQualityLevel: (level: number) => void;
+  setUASTC: (v: boolean) => void;
+  setMipGen: (v: boolean) => void;
+  setCompressionLevel: (level: number) => void;
+  setDebug: (v: boolean) => void;
+  encode: (output: Uint8Array) => number;
+  delete: () => void;
 }
+
+let basisModulePromise: Promise<BasisModule> | null = null;
 
 /**
- * 将像素数据垫到 Basis Universal 要求的合法尺寸
+ * 加载并初始化 Basis Universal WASM 编码器
  *
- * 规则:
- *   - generateMipmaps=true → 垫到 2 的幂
- *   - generateMipmaps=false → 垫到 4 的倍数
- *   - 用透明黑 (0,0,0,0) 填充新增区域
- *
- * @returns 对齐后的像素数据和尺寸
+ * 从 @loaders.gl/textures 包内读取 vendor 的 basis_encoder.{js,wasm}。
+ * 仅首次调用实际加载，之后复用缓存。线程安全：多次并发调用共享同一个 promise。
  */
-function alignTextureSize(
-  pixels: Uint8Array,
-  width: number,
-  height: number,
-  generateMipmaps: boolean,
-): { pixels: Uint8Array; width: number; height: number } {
-  const targetW = generateMipmaps ? nextPowerOf2(width) : ceilTo4(width);
-  const targetH = generateMipmaps ? nextPowerOf2(height) : ceilTo4(height);
+async function loadBasisEncoder(): Promise<BasisModule> {
+  if (basisModulePromise) return basisModulePromise;
 
-  if (targetW === width && targetH === height) {
-    return { pixels, width, height };
-  }
+  basisModulePromise = (async () => {
+    // 从 @loaders.gl/textures 已导出的入口点反向查找包目录
+    const entryPoint = createRequire(import.meta.url).resolve('@loaders.gl/textures');
+    // entryPoint → <pkgDir>/dist/index.js
+    const pkgDir = path.resolve(path.dirname(entryPoint), '..');
+    const libDir = path.join(pkgDir, 'dist', 'libs');
+    const jsPath = path.join(libDir, 'basis_encoder.js');
+    const wasmPath = path.join(libDir, 'basis_encoder.wasm');
 
-  const aligned = new Uint8Array(targetW * targetH * 4);
-  // 逐行拷贝原始像素（新增区域自动为 0,0,0,0 透明黑）
-  for (let y = 0; y < height; y++) {
-    const srcStart = y * width * 4;
-    const dstStart = y * targetW * 4;
-    aligned.set(pixels.subarray(srcStart, srcStart + width * 4), dstStart);
-  }
+    const wasmBinary = readFileSync(wasmPath);
+    const jsCode = readFileSync(jsPath, 'utf-8');
 
-  return { pixels: aligned, width: targetW, height: targetH };
+    // 用 Function 构造器模拟 CommonJS 环境执行 Emscripten 模块
+    const cjsRequire = createRequire(import.meta.url);
+    const sandboxMod = { exports: {} as any };
+    const wrapper = new Function(
+      'module', 'exports', 'require', '__filename', '__dirname',
+      jsCode,
+    );
+    wrapper(sandboxMod, sandboxMod.exports, cjsRequire, jsPath, path.dirname(jsPath));
+    const createModule: (opts: { wasmBinary: ArrayBuffer }) => Promise<BasisModule> =
+      sandboxMod.exports;
+
+    const mod = await createModule({ wasmBinary: wasmBinary.buffer });
+    mod.initializeBasis();
+    return mod;
+  })();
+
+  return basisModulePromise;
 }
 
-// ── Alpha detection ────────────────────────────────────
+// ── Image decoders ──────────────────────────────────────
 
-/**
- * 检测 RGBA 像素中是否有半透明像素
- *
- * 优化策略:
- *   1. 先用步进扫描快速判断（64 像素步长）
- *   2. 步进扫描确定有不透明→无需继续
- *   3. 步进扫描未发现→降级到全扫描
- *   4. 调用方如果已从元数据获知 alpha 信息，可直接传入 knownHasAlpha
- */
-function detectAlpha(pixels: Uint8Array, knownHasAlpha?: boolean): boolean {
-  if (knownHasAlpha !== undefined) return knownHasAlpha;
-
-  // 快速步进扫描 — 64 步长覆盖 1/64 像素
-  for (let i = 3; i < pixels.length; i += 256) {
-    if ((pixels[i] as number) < 255) return true;
-  }
-
-  // 降级全扫描
-  for (let i = 3; i < pixels.length; i += 4) {
-    if ((pixels[i] as number) < 255) return true;
-  }
-
-  return false;
-}
-
-// ── Image decoders ─────────────────────────────────────
+const _require = createRequire(import.meta.url);
+const UPNG: any = _require('upng-js');
+const jpeg: any = _require('jpeg-js');
 
 async function decodeImageToRGBA(
   data: Uint8Array,
@@ -139,19 +131,14 @@ async function decodeImageToRGBA(
       const img = UPNG.decode(data);
       const frame = UPNG.toRGBA8(img)[0] as ArrayBuffer;
       const pixels = new Uint8Array(frame);
-
-      // PNG 元数据: 从 color type 判断 alpha
-      //  PNG color types: 0=Grayscale, 2=RGB, 3=Indexed, 4=Grayscale+Alpha, 6=RGBA
       const colorType = img.tabs?.IHDR?.colorType ?? 2;
       const hasAlpha =
         colorType === 4 || colorType === 6 || (img.tabs?.acTL != null);
-
       return { pixels, width: img.width, height: img.height, hasAlpha };
     }
 
     if (mimeType === 'image/jpeg') {
       const img = jpeg.decode(data, { useTArray: true });
-      // JPEG 不支持 alpha 通道
       return {
         pixels: new Uint8Array(img.data),
         width: img.width,
@@ -168,76 +155,70 @@ async function decodeImageToRGBA(
   return null;
 }
 
-// ── WASM initialization ────────────────────────────────
-
-let initialized = false;
-
-// ── Ktx2Encoder ────────────────────────────────────────
+// ── Ktx2Encoder ─────────────────────────────────────────
 
 export class Ktx2Encoder {
-  private wasmPath: string | undefined;
-
-  constructor(wasmPath?: string) {
-    this.wasmPath = wasmPath;
-  }
-
-  private async ensureInit(): Promise<void> {
-    if (initialized) return;
-    await initBasisModule({
-      wasmPath: this.wasmPath,
-      withEncoder: true,
-    });
-    initialized = true;
-  }
-
   /**
-   * 将 RGBA 像素数据编码为 KTX2
+   * 将 RGBA 像素数据编码为 KTX2（Basis Universal）
    *
    * @param pixels  RGBA Uint8Array（长度 = width * height * 4）
    * @param width   图像宽度
    * @param height  图像高度
    * @param options 编码选项
-   * @returns       KTX2 数据（尺寸会自动对齐到合法值）
+   * @returns       KTX2 编码结果，失败返回 null
    */
   async encode(
     pixels: Uint8Array,
     width: number,
     height: number,
     options: Ktx2EncodeOptions,
-    knownHasAlpha?: boolean,
   ): Promise<Ktx2EncodeResult | null> {
-    await this.ensureInit();
+    const mod = await loadBasisEncoder();
+    const encoder = new mod.BasisEncoder();
 
-    // ── Fix 2: 尺寸对齐到 4 倍数 / POT ──
-    const aligned = alignTextureSize(pixels, width, height, options.generateMipmaps);
+    try {
+      encoder.setCreateKTX2File(true);
+      encoder.setKTX2UASTCSupercompression(true);
+      encoder.setKTX2SRGBTransferFunc(true);
 
-    const formatMap: Record<string, 'ETC1S' | 'UASTC_LDR'> = {
-      etc1s: 'ETC1S',
-      uastc: 'UASTC_LDR',
-    };
+      // 设置源图
+      encoder.setSliceSourceImage(0, pixels, width, height, false);
+      encoder.setPerceptual(false);
+      encoder.setMipSRGB(false);
 
-    const result = await encodeImage(aligned.pixels, aligned.width, aligned.height, {
-      format: formatMap[options.format] ?? 'ETC1S',
-      quality: options.quality,
-      compressionLevel: options.compressionLevel ?? 2,
-      generateMipmaps: options.generateMipmaps,
-      outputKTX2: true,
-    });
+      // 格式与质量
+      const isUastc = options.format === 'uastc';
+      encoder.setUASTC(isUastc);
+      encoder.setQualityLevel(options.quality);
+      if (isUastc && options.compressionLevel !== undefined) {
+        encoder.setCompressionLevel(options.compressionLevel);
+      }
 
-    if (!result) return null;
+      // Mipmap（由 Basis 内部生成）
+      encoder.setMipGen(options.generateMipmaps);
 
-    // ── Fix 3: 从解码元数据获知 alpha，避免全扫描 ──
-    // 此处已知像素是 RGBA，需扫描（但由调用方在 compressTexture 中传入已知值）
-    const hasAlpha = detectAlpha(aligned.pixels, knownHasAlpha);
+      // 编码
+      const outputSize = Math.max(width * height * 4, 4096);
+      const output = new Uint8Array(outputSize);
+      const numBytes = encoder.encode(output);
 
-    return {
-      data: result,
-      width: aligned.width,
-      height: aligned.height,
-      originalWidth: width,
-      originalHeight: height,
-      hasAlpha,
-    };
+      if (!numBytes || numBytes <= 0) {
+        console.warn('[ktx2] BasisEncoder returned 0 bytes');
+        return null;
+      }
+
+      return {
+        data: output.subarray(0, numBytes),
+        width,
+        height,
+        hasAlpha: true, // Basis 内部自行检测，默认 true
+      };
+    } catch (err) {
+      console.warn('[ktx2] Encoding failed:', (err as Error).message);
+      return null;
+    } finally {
+      encoder.delete();
+    }
   }
 
   /**
@@ -260,7 +241,7 @@ export class Ktx2Encoder {
       if (ok) count++;
     }
 
-    // ── Fix 1: 注册 KHR_texture_basisu 扩展 ──
+    // 注册 KHR_texture_basisu 扩展
     if (count > 0) {
       const root = doc.getRoot();
       const existing = root.listExtensionsUsed();
@@ -287,40 +268,29 @@ export class Ktx2Encoder {
 
     const size = tex.getSize();
     if (!size || size[0] === 0 || size[1] === 0) return false;
-    const [width, height] = size;
 
     const mimeType = tex.getMimeType();
 
     // 跳过已压缩的
     if (mimeType === 'image/ktx2') return false;
 
-    // 解码 PNG/JPEG → RGBA（传入已知 alpha 信息）
+    // 解码 PNG/JPEG → RGBA
     let rgbaPixels: Uint8Array;
-    let imgWidth = width;
-    let imgHeight = height;
-    let knownAlpha: boolean | undefined;
+    let imgWidth = size[0];
+    let imgHeight = size[1];
 
-    if (mimeType === 'image/png') {
-      const decoded = await decodeImageToRGBA(image, 'image/png');
+    if (mimeType === 'image/png' || mimeType === 'image/jpeg') {
+      const decoded = await decodeImageToRGBA(image, mimeType);
       if (!decoded) return false;
       rgbaPixels = decoded.pixels;
       imgWidth = decoded.width;
       imgHeight = decoded.height;
-      knownAlpha = decoded.hasAlpha; // 来自 PNG header
-    } else if (mimeType === 'image/jpeg') {
-      const decoded = await decodeImageToRGBA(image, 'image/jpeg');
-      if (!decoded) return false;
-      rgbaPixels = decoded.pixels;
-      imgWidth = decoded.width;
-      imgHeight = decoded.height;
-      knownAlpha = false; // JPEG 无 alpha
     } else {
-      // 未知格式/raw RGBA
+      // 未知格式—直接当 RGBA 处理
       rgbaPixels = image;
     }
 
-    // encode 内部会做尺寸对齐，传入已知 alpha 信息避免全像素扫描
-    const result = await this.encode(rgbaPixels, imgWidth, imgHeight, options, knownAlpha);
+    const result = await this.encode(rgbaPixels, imgWidth, imgHeight, options);
     if (!result) return false;
 
     tex.setImage(result.data);

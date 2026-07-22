@@ -1,11 +1,11 @@
 import type { GlbInstance, DracoConfig } from '../types.js';
 import { writeGlb } from './reader.js';
 import { debug } from '../util/log.js';
-import { Document, Accessor, Mesh, Material } from '@gltf-transform/core';
+import { Document, Accessor, Mesh, Material, Texture } from '@gltf-transform/core';
 
 let _uuidCounter = 0;
 function uuid(): string { return `${++_uuidCounter}`; }
-import { dedup, join, prune, draco, textureCompress } from '@gltf-transform/functions';
+import { dedup, join, prune, draco } from '@gltf-transform/functions';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 
@@ -18,7 +18,6 @@ export interface TileWriteResult {
 export interface TileWriteOptions {
   enableDraco?: boolean;
   dracoConfig?: DracoConfig;
-  enableTextureCompress?: boolean;
   sourceDoc?: Document;
 }
 
@@ -32,10 +31,10 @@ export function buildTileDocument(
   sourceDoc: Document,
 ): Document {
   const doc = new Document();
-  // Create a default buffer for accessor data storage
   doc.createBuffer();
   const scene = doc.createScene();
   const matCache = new Map<string, Material>();
+  const texCache = new Map<string, Texture>();
 
   for (const inst of instances) {
     const node = doc.createNode(inst.name);
@@ -48,7 +47,7 @@ export function buildTileDocument(
     ]);
     const srcMesh = inst.mesh;
     if (srcMesh) {
-      const newMesh = copyMesh(doc, srcMesh, matCache);
+      const newMesh = copyMesh(doc, srcMesh, matCache, texCache);
       node.setMesh(newMesh);
     }
     scene.addChild(node);
@@ -58,17 +57,25 @@ export function buildTileDocument(
 
 // ── Deep copy mesh across Documents ─────────────────────
 
+const TEXTURE_SLOTS = [
+  'baseColorTexture',
+  'metallicRoughnessTexture',
+  'normalTexture',
+  'occlusionTexture',
+  'emissiveTexture',
+] as const;
+
 function copyMesh(
   targetDoc: Document,
   source: Mesh,
   matCache: Map<string, Material>,
+  texCache: Map<string, Texture>,
 ): Mesh {
   const mesh = targetDoc.createMesh(source.getName() || 'mesh');
   for (const src of source.listPrimitives()) {
     const prim = targetDoc.createPrimitive();
     prim.setMode(src.getMode());
 
-    // Copy known vertex attributes
     const attrNames = ['POSITION', 'NORMAL', 'TEXCOORD_0', 'TEXCOORD_1',
       'JOINTS_0', 'WEIGHTS_0', 'COLOR_0', 'TANGENT'];
     for (const name of attrNames) {
@@ -88,6 +95,8 @@ function copyMesh(
         try { dst.setMetallicFactor(srcMat.getMetallicFactor()); } catch {}
         try { dst.setRoughnessFactor(srcMat.getRoughnessFactor()); } catch {}
         try { dst.setDoubleSided(srcMat.getDoubleSided()); } catch {}
+        // 拷贝纹理贴图引用（纹理已在源文档压缩为 KTX2）
+        copyMaterialTextures(targetDoc, srcMat, dst, texCache);
         matCache.set(key, dst);
       }
       prim.setMaterial(dst);
@@ -95,6 +104,58 @@ function copyMesh(
     mesh.addPrimitive(prim);
   }
   return mesh;
+}
+
+/**
+ * 从源材质拷贝所有纹理引用到目标材质
+ */
+function copyMaterialTextures(
+  targetDoc: Document,
+  src: Material,
+  dst: Material,
+  texCache: Map<string, Texture>,
+): void {
+  for (const slot of TEXTURE_SLOTS) {
+    const srcTex = (src as any)[`get${slot.charAt(0).toUpperCase() + slot.slice(1)}`]?.();
+    if (!srcTex) continue;
+
+    const texKey = srcTex.getName() || `tex_${uuid()}`;
+    let dstTex = texCache.get(texKey);
+    if (!dstTex) {
+      dstTex = targetDoc.createTexture(texKey);
+      const imgData = srcTex.getImage();
+      if (imgData) {
+        dstTex.setImage(new Uint8Array(imgData));
+        dstTex.setMimeType(srcTex.getMimeType());
+      }
+      texCache.set(texKey, dstTex);
+    }
+
+    // 从 TextureInfo 读取采样参数和 texCoord
+    const infoMethod = `get${slot.charAt(0).toUpperCase() + slot.slice(1)}Info`;
+    const texInfo = (src as any)[infoMethod]?.();
+    const texCoord = texInfo?.getTexCoord?.() ?? 0;
+
+    // 设置纹理
+    const setter = `set${slot.charAt(0).toUpperCase() + slot.slice(1)}`;
+    try {
+      (dst as any)[setter](dstTex, texCoord);
+    } catch {
+      (dst as any)[setter]?.(dstTex);
+    }
+
+    // 拷贝 TextureInfo 采样参数到目标 TextureInfo
+    if (texInfo) {
+      const dstInfoMethod = infoMethod;
+      const dstTexInfo = (dst as any)[dstInfoMethod]?.();
+      if (dstTexInfo) {
+        try { dstTexInfo.setMagFilter(texInfo.getMagFilter()); } catch {}
+        try { dstTexInfo.setMinFilter(texInfo.getMinFilter()); } catch {}
+        try { dstTexInfo.setWrapS(texInfo.getWrapS()); } catch {}
+        try { dstTexInfo.setWrapT(texInfo.getWrapT()); } catch {}
+      }
+    }
+  }
 }
 
 function copyAccessor(targetDoc: Document, source: Accessor): Accessor {
@@ -128,12 +189,6 @@ async function maybeApplyDraco(doc: Document, opts?: TileWriteOptions): Promise<
   debug('  ∟ Applied Draco');
 }
 
-async function maybeApplyTextureCompress(doc: Document, opts?: TileWriteOptions): Promise<void> {
-  if (!opts?.enableTextureCompress) return;
-  await doc.transform(textureCompress({}));
-  debug('  ∟ Applied KTX2');
-}
-
 // ── Write single tile ───────────────────────────────────
 
 export async function writeTileGlb(
@@ -147,7 +202,7 @@ export async function writeTileGlb(
   const doc = buildTileDocument(instances, sourceDoc);
   await optimizeDocument(doc);
   await maybeApplyDraco(doc, options);
-  await maybeApplyTextureCompress(doc, options);
+  // KTX2 纹理压缩已在 Phase 2.5 源文档级完成，瓦片级不再重复压缩
   const outPath = path.join(outputDir, `${tileName}.glb`);
   await fs.mkdir(path.dirname(outPath), { recursive: true });
   await writeGlb(doc, outPath);

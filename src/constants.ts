@@ -19,4 +19,5 @@ export const DEFAULTS = {
   simplifyRatio: 0.5,
   simplifyError: 0.01,
   subtreeLevels: 5,
+  ktx2Quality: 128,
 } as const;

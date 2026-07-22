@@ -27,6 +27,9 @@ program.option('--subdivision <scheme>', 'QUADTREE or OCTREE', 'OCTREE');
 program.option('--subtree-levels <n>', 'Subtree levels', String(DEFAULTS.subtreeLevels));
 program.option('--draco', 'Enable Draco compression');
 program.option('--ktx2', 'Enable KTX2 texture compression');
+program.option('--ktx2-format <format>', 'KTX2 format: etc1s|uastc', 'etc1s');
+program.option('--ktx2-quality <n>', 'KTX2 quality 1-255', String(DEFAULTS.ktx2Quality));
+program.option('--ktx2-mipmaps', 'Generate mipmaps');
 program.option('-v, --verbose', 'Verbose logging');
 
 program.parse(process.argv);
@@ -63,6 +66,11 @@ async function main(): Promise<void> {
     },
     dracoConfig: args.draco ? { positionBits: 11, normalBits: 10, texcoordBits: 12 } : undefined,
     enableTextureCompress: !!args.ktx2,
+    textureCompressConfig: args.ktx2 ? {
+      format: args.ktx2Format as 'etc1s' | 'uastc',
+      quality: parseInt(args.ktx2Quality, 10),
+      generateMipmaps: !!args.ktx2Mipmaps,
+    } : undefined,
     tilesetConfig: {
       geodetic: args.lon !== undefined ? { longitude: parseFloat(args.lon), latitude: parseFloat(args.lat), height: parseFloat(args.alt ?? '0') } : undefined,
       implicitTiling: args.implicit ? { subdivisionScheme: (args.subdivision as string).toUpperCase() === 'QUADTREE' ? 'QUADTREE' : 'OCTREE', subtreeLevels: parseInt(args.subtreeLevels, 10), availableLevels: parseInt(args.maxDepth, 10) } : undefined,

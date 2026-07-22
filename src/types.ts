@@ -66,6 +66,14 @@ export interface LODConfig {
   levels: LODLevel[];
 }
 
+// ── KTX2 texture compression config ───────────────────
+export interface TextureCompressConfig {
+  format: 'etc1s' | 'uastc';
+  quality: number;       // 1-255 (default 128)
+  generateMipmaps: boolean;
+  compressionLevel?: number; // 0-4 for uastc
+}
+
 // ── Pipeline input / output ────────────────────────────
 export interface PipelineOptions {
   input: string;
@@ -75,6 +83,7 @@ export interface PipelineOptions {
   lodConfig: LODConfig;
   dracoConfig?: DracoConfig;
   enableTextureCompress: boolean;
+  textureCompressConfig?: TextureCompressConfig; // 新增: KTX2 压缩参数
   tilesetConfig: Tileset11Config;
   verbose: boolean;
 }

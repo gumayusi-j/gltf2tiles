@@ -8,6 +8,7 @@ import { mergeBboxes, computeGeometricError, bboxToTilesetBox } from './spatial/
 import { generateTilesetJson } from './tileset/tileset-1.1.js';
 import { generateTileLODs, generateLODTilesetJson } from './lod/generator.js';
 import { buildImplicitTileset, writeSubtreeFile } from './tileset/implicit.js';
+import { Ktx2Encoder } from './texture/index.js';
 import { info } from './util/log.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
@@ -21,7 +22,9 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
   info(`Max items/tile: ${opts.maxItemsPerTile}, Max depth: ${opts.maxDepth}`);
   if (opts.lodConfig.levels.length > 1) info(`LOD levels: ${opts.lodConfig.levels.length}`);
   if (opts.dracoConfig) info('Draco: ON');
-  if (opts.enableTextureCompress) info('KTX2: ON');
+  if (opts.enableTextureCompress && opts.textureCompressConfig) {
+    info(`KTX2: ON (${opts.textureCompressConfig.format}, q=${opts.textureCompressConfig.quality})`);
+  }
   if (opts.tilesetConfig.implicitTiling) info('Implicit tiling: ON');
 
   // ── 1. Read GLB ──────────────────────────────────────
@@ -33,6 +36,15 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
   const instances: GlbInstance[] = flattenScene(doc);
   if (instances.length === 0) throw new Error('No meshes found in input file');
   info(`  ∟ ${instances.length} instance(s) extracted`);
+
+  // ── 2.5. Source-level texture compression (KTX2) ────
+  let compressedTextures = 0;
+  if (opts.enableTextureCompress && opts.textureCompressConfig) {
+    info('Phase 2.5/5: Compressing textures (KTX2)...');
+    const encoder = new Ktx2Encoder();
+    compressedTextures = await encoder.compressDocument(doc, opts.textureCompressConfig);
+    info(`  ∟ ${compressedTextures} texture(s) compressed to KTX2`);
+  }
 
   // ── 3. Spatial partitioning ──────────────────────────
   info('Phase 3/5: Spatial partitioning...');
@@ -97,7 +109,6 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
         sourceDoc: doc,
         enableDraco: opts.dracoConfig !== undefined,
         dracoConfig: opts.dracoConfig,
-        enableTextureCompress: opts.enableTextureCompress,
       });
       totalTriangles += result.triangleCount;
       totalVertices += result.vertexCount;

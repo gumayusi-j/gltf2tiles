@@ -1,6 +1,6 @@
 {
   "name": "glb23dtile",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Convert GLB/glTF to 3D Tiles 1.1 — spatial partitioning, LOD, instancing",
   "type": "module",
   "bin": {

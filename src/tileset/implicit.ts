@@ -76,7 +76,7 @@ export function buildImplicitTileset(
       asset: {
         version: '1.1',
         gltfUpAxis: 'Y',
-        generator: 'gltf2tiles v0.1.0',
+        generator: 'gltf2tiles v0.2.0',
       },
       geometricError: root.geometricError,
       root: rootJson,

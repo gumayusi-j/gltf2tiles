@@ -10,7 +10,7 @@ import * as fs from 'node:fs/promises';
 
 const program = new Command();
 
-program.name('gltf2tiles').description('Convert GLB/glTF to 3D Tiles 1.1').version('0.1.0');
+program.name('gltf2tiles').description('Convert GLB/glTF to 3D Tiles 1.1').version('0.2.0');
 
 program.requiredOption('-i, --input <path>', 'Input GLB/glTF file');
 program.requiredOption('-o, --output <dir>', 'Output directory');

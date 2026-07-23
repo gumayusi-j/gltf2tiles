@@ -8,13 +8,13 @@ Convert GLB/glTF to **3D Tiles 1.1** with spatial partitioning, LOD, and compres
 
 ```bash
 # 解压
-tar -xzf gltf2tiles-0.1.0.tgz
+tar -xzf gltf2tiles-0.2.0.tgz
 
 # 直接运行
 node package/dist/cli.js -i model.glb -o ./output
 
 # 或全局安装
-npm install -g ./gltf2tiles-0.1.0.tgz
+npm install -g ./gltf2tiles-0.2.0.tgz
 gltf2tiles -i model.glb -o ./output
 ```
 
